@@ -1,0 +1,96 @@
+{
+ "reVC-data.data": {
+  "type": "application/octet-stream",
+  "size": 233652593,
+  "parts": [
+   {
+    "name": "reVC-data.data.00.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.00.br.c0.bin",
+     "reVC-data.data.00.br.c1.bin",
+     "reVC-data.data.00.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.01.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.01.br.c0.bin",
+     "reVC-data.data.01.br.c1.bin",
+     "reVC-data.data.01.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.02.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.02.br.c0.bin",
+     "reVC-data.data.02.br.c1.bin",
+     "reVC-data.data.02.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.03.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.03.br.c0.bin",
+     "reVC-data.data.03.br.c1.bin",
+     "reVC-data.data.03.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.04.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.04.br.c0.bin",
+     "reVC-data.data.04.br.c1.bin",
+     "reVC-data.data.04.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.05.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.05.br.c0.bin",
+     "reVC-data.data.05.br.c1.bin",
+     "reVC-data.data.05.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.06.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.06.br.c0.bin",
+     "reVC-data.data.06.br.c1.bin",
+     "reVC-data.data.06.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.07.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.07.br.c0.bin",
+     "reVC-data.data.07.br.c1.bin",
+     "reVC-data.data.07.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.08.br",
+    "raw": 25165824,
+    "chunks": [
+     "reVC-data.data.08.br.c0.bin",
+     "reVC-data.data.08.br.c1.bin",
+     "reVC-data.data.08.br.c2.bin"
+    ]
+   },
+   {
+    "name": "reVC-data.data.09.br",
+    "raw": 7160177,
+    "chunks": [
+     "reVC-data.data.09.br.c0.bin"
+    ]
+   }
+  ]
+ }
+}

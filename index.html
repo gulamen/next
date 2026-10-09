@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>reVC (lite)</title>
+<!-- Yandex Games SDK: on Yandex (or via sdk-dev-proxy) /sdk.js exists; on a plain local server it is simply missing -->
+<script src="/sdk.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #e8e8f0; font: 15px/1.4 system-ui, sans-serif; overflow: hidden; }
+  #canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: block; outline: none;
+            cursor: none; background: #000; }          /* 16:9, size set by fitCanvas(); game draws its own cursor */
+  /* loading screen: only a pink slider */
+  #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #07060b;
+             transition: opacity .5s ease; }
+  #overlay.done { opacity: 0; pointer-events: none; }
+  #bar { position: relative; width: min(460px, 72vw); height: 14px; border-radius: 999px; background: #1a1220;
+         box-shadow: inset 0 0 0 1px rgba(255,120,200,.18); }
+  #clip { position: absolute; left: 0; right: -16px; top: -16px; bottom: -16px; overflow: hidden; }
+  /* the slider moves with transform transitions: they run on the compositor and keep moving even while the game
+     is busy loading (the page itself cannot run then) */
+  #mover { position: absolute; left: 0; top: 16px; bottom: 16px; width: calc(100% - 16px); transform: translateX(-100%);
+           will-change: transform; }
+  #fill { position: absolute; inset: 0; border-radius: 999px; overflow: hidden;
+          background: linear-gradient(90deg, #ff5fa8, #ff8fd1, #c86bff, #ff4f9a, #ffb3de, #ff5fa8);
+          background-size: 200% 100%; animation: flow 2.4s linear infinite;
+          box-shadow: 0 0 14px rgba(255,95,168,.75), 0 0 30px rgba(200,107,255,.35); }
+  #fill::after { content: ""; position: absolute; inset: 0; border-radius: inherit;
+          background: repeating-linear-gradient(-45deg, rgba(255,255,255,.22) 0 8px, rgba(255,255,255,0) 8px 16px);
+          background-size: 22.6px 100%; animation: stripes .7s linear infinite; }
+  #shine { position: absolute; top: 0; bottom: 0; left: 0; width: 40%; will-change: transform;
+           background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.55), rgba(255,255,255,0));
+           animation: shine 1.3s ease-in-out infinite; }
+  #knob { position: absolute; right: -11px; top: 50%; width: 22px; height: 22px; margin-top: -11px; border-radius: 50%;
+          background: radial-gradient(circle at 35% 35%, #fff, #ffc2e4 40%, #ff5fa8 75%);
+          box-shadow: 0 0 10px #ff7fc0, 0 0 20px rgba(255,95,168,.6); }
+  @keyframes shine { from { transform: translateX(-110%); } to { transform: translateX(260%); } }
+  @keyframes flow { to { background-position: 200% 0; } }
+  @keyframes stripes { to { background-position: 22.6px 0; } }
+  #oops { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+          background: #07060b; color: #ffd6ec; font: 17px/1.4 system-ui, sans-serif; text-align: center; padding: 24px; z-index: 10; }
+  #oops button { font: inherit; padding: 10px 28px; border: 0; border-radius: 999px; cursor: pointer; color: #1a0612;
+                 background: linear-gradient(90deg, #ff5fa8, #c86bff); box-shadow: 0 0 18px rgba(255,95,168,.6); }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="overlay"><div id="bar"><div id="clip"><div id="mover"><div id="fill"><div id="shine"></div></div><div id="knob"></div></div></div></div></div>
+<div id="oops"><div id="oopsText"></div><button id="oopsBtn"></button></div>
+<script>
+  var V = '20261002r7';   // build id: new files are never mixed with old cached ones
+  // ---- 16:9 picture, always: the canvas keeps its aspect and is centred (black bars), whatever the window size.
+  // Render size = the largest 16:9 the screen allows (x devicePixelRatio, max 2560 wide), CSS size = fits the window.
+  function fit169(w, h) { if (w / h > 16 / 9) w = h * 16 / 9; else h = w * 9 / 16; return [w, h]; }
+  function fitCanvas() {
+    var s = fit169(innerWidth, innerHeight), c = document.getElementById('canvas');
+    c.style.setProperty('width', Math.round(s[0]) + 'px', 'important');
+    c.style.setProperty('height', Math.round(s[1]) + 'px', 'important');
+  }
+  // ---- Device class: weak devices (<= 4 GB RAM or <= 4 CPU threads) get 30 fps and at most 1280x720,
+  // the rest 60 fps and at most 1920x1080. ?fps=30|60 in the address overrides the frame cap.
+  var WEAK = (navigator.deviceMemory > 0 && navigator.deviceMemory <= 4) ||
+             (navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4);
+  function renderSize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var s = fit169(Math.max(innerWidth, screen.width || 0), Math.max(innerHeight, screen.height || 0));
+    var w = Math.min(Math.round(s[0] * dpr), WEAK ? 1280 : 1920); return [w, Math.round(w * 9 / 16)];
+  }
+  window.addEventListener('resize', fitCanvas); fitCanvas();
+  // Emscripten removes the canvas CSS size whenever it sets the canvas size -> put the 16:9 size back
+  new MutationObserver(function () {
+    var c = document.getElementById('canvas'); if (!c.style.width || !c.style.height) fitCanvas();
+  }).observe(document.getElementById('canvas'), { attributes: true, attributeFilter: ['style'] });
+  // ---- A real crash: show a short message with a reload button instead of a frozen picture (details: console).
+  var gameLang = 'ru', fatalShown = false;
+  function fatal(e) {
+    var t = String(e && (e.stack || e.message) || e);
+    console.error('FATAL: ' + t);
+    if (fatalShown || !/RuntimeError|Aborted|abort\(|unreachable|out of bounds|null function|signature mismatch|LinkError|CompileError/i.test(t)) return;
+    fatalShown = true;
+    var en = gameLang === 'en', box = document.getElementById('oops');
+    document.getElementById('oopsText').textContent = en ? 'Something went wrong. Please reload the page.' : 'Что-то пошло не так. Перезагрузите страницу.';
+    var b = document.getElementById('oopsBtn'); b.textContent = en ? 'Reload' : 'Перезагрузить';
+    b.onclick = function () { location.reload(); };
+    box.style.display = 'flex';
+  }
+  // ---- Yandex Games SDK (no ads, no purchases: init + loading/gameplay signals only)
+  var ysdk = null;
+  var ysdkReady = (window.YaGames ? YaGames.init() : Promise.reject('YaGames not found'))
+    .then(function (s) { ysdk = s; console.log('Yandex SDK ready, env:', s.environment); return s; })
+    .catch(function (e) { console.warn('Yandex SDK unavailable, running without it:', e); return null; });
+  function ysdkCall(fn) { ysdkReady.then(function (s) { if (s && s.features) try { fn(s.features); } catch (e) { console.warn(e); } }); }
+  // ---- Fullscreen ad: NOT called automatically. Call showFullscreenAd() from elsewhere when needed.
+  // Returns a Promise<boolean>: true if the ad was actually shown, false otherwise (no SDK, error, too frequent, already showing).
+  var adShowing = false;
+  function showFullscreenAd() {
+    return ysdkReady.then(function (s) {
+      if (!s || !s.adv || typeof s.adv.showFullscreenAdv !== 'function' || adShowing) return false;
+      var gp = s.features && s.features.GameplayAPI;
+      adShowing = true;
+      return new Promise(function (resolve) {
+        var finished = false;
+        function resume(wasShown) {          // runs once: after close, on error or offline
+          if (finished) return; finished = true; adShowing = false;
+          adPause(false);
+          try { if (gp) gp.start(); } catch (e) { console.warn(e); }
+          if (typeof Module !== 'undefined' && Module.canvas) Module.canvas.focus();
+          resolve(!!wasShown);
+        }
+        adPause(true);                      // the game loop stops while the ad is shown
+        try { if (gp) gp.stop(); } catch (e) { console.warn(e); }
+        try {
+          s.adv.showFullscreenAdv({ callbacks: {
+            onClose: function (wasShown) { resume(wasShown); },
+            onError: function (e) { console.warn('Fullscreen ad error:', e); resume(false); },
+            onOffline: function () { console.warn('Fullscreen ad: offline'); resume(false); }
+          } });
+        } catch (e) { console.warn('Fullscreen ad error:', e); resume(false); }
+      });
+    });
+  }
+  // ----
+  // ---- Hard pause: hidden page, lost focus (Alt+Tab, another tab, click outside the game) or an ad -> the game loop
+  // stops completely (glfw.cpp patch reads Module.reVCPaused: 1 = focus lost -> pause menu on return, 2 = ad), sound
+  // is suspended and Yandex GameplayAPI gets stop()/start().
+  var gameStarted = false;
+  var pauseBy = { hidden: document.hidden, blur: false, ad: false }, audioCtxs = [];
+  (function () {                                    // remember every AudioContext (OpenAL) to stop/start sound
+    var AC = window.AudioContext || window.webkitAudioContext; if (!AC || AC.reVCWrapped) return;
+    function Wrapped(o) { var c = o === undefined ? new AC() : new AC(o); audioCtxs.push(c); return c; }
+    Wrapped.prototype = AC.prototype; Wrapped.reVCWrapped = true;
+    window.AudioContext = Wrapped; if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
+  })();
+  function applyPause() {
+    var p = pauseBy.ad ? 2 : (pauseBy.hidden || pauseBy.blur) ? 1 : 0;
+    if (typeof Module === 'undefined' || p === (Module.reVCPaused | 0)) return;
+    Module.reVCPaused = p;
+    audioCtxs.forEach(function (c) { try { if (p) c.suspend(); else c.resume(); } catch (e) {} });
+    if (gameStarted) ysdkCall(function (f) { if (f.GameplayAPI) { if (p) f.GameplayAPI.stop(); else f.GameplayAPI.start(); } });
+    if (p) syncSaves();
+  }
+  function adPause(on) { pauseBy.ad = on; applyPause(); }
+  document.addEventListener('visibilitychange', function () { pauseBy.hidden = document.hidden; applyPause(); });
+  window.addEventListener('blur', function () { pauseBy.blur = true; applyPause(); });
+  window.addEventListener('focus', function () { pauseBy.blur = false; applyPause(); });
+  window.addEventListener('pagehide', function () { syncSaves(); });
+  ['pointerdown', 'mousedown', 'keydown', 'touchstart'].forEach(function (ev) {
+    document.addEventListener(ev, function (e) {    // a real click/key: back in the game; sound may start (browser rule)
+      if (!e.isTrusted) return;
+      if (pauseBy.blur) { pauseBy.blur = false; applyPause(); }
+      if (!(Module.reVCPaused | 0)) audioCtxs.forEach(function (c) { if (c.state === 'suspended') c.resume(); });
+    }, true);
+  });
+  // ---- Saves: re3 keeps saves (and gta_vc.set) in /userfiles; it is stored in IndexedDB (IDBFS), read before the game
+  // starts and written after every save (PCSave.cpp patch calls Module.reVCSyncSaves) and when the page is hidden.
+  var SAVE_DIR = '/userfiles', savesReady = false, syncing = false, syncAgain = false;
+  function mountSaves() {
+    try { FS.mkdir(SAVE_DIR); } catch (e) {}
+    if (typeof IDBFS === 'undefined') { console.warn('IDBFS is not linked: saves are not kept'); return; }
+    try { FS.mount(IDBFS, {}, SAVE_DIR); } catch (e) { console.warn('saves: mount failed', e); return; }
+    Module.addRunDependency('reVC-saves');
+    FS.syncfs(true, function (err) {
+      if (err) console.warn('saves: load failed', err);
+      savesReady = true; Module.removeRunDependency('reVC-saves');
+    });
+  }
+  function syncSaves() {
+    if (!savesReady) return;
+    if (syncing) { syncAgain = true; return; }
+    syncing = true;
+    FS.syncfs(false, function (err) {
+      syncing = false; if (err) console.warn('saves: store failed', err);
+      if (syncAgain) { syncAgain = false; syncSaves(); }
+    });
+  }
+  // ----
+  var overlay = document.getElementById('overlay'), moverEl = document.getElementById('mover'), shownP = 0;
+  function sliderNow() {            // where the slider is right now (it may be in the middle of a transition)
+    var m = getComputedStyle(moverEl).transform, w = moverEl.offsetWidth || 1;
+    if (!m || m === 'none') return shownP;
+    var p = m.split(','); return Math.max(0, Math.min(1, 1 + parseFloat(p[4]) / w));
+  }
+  function sliderSet(p, sec) {      // jump (sec = 0) or glide to p
+    shownP = Math.max(0, Math.min(1, p));
+    moverEl.style.transition = sec > 0 ? 'transform ' + sec + 's cubic-bezier(.2,.65,.3,1)' : 'none';
+    moverEl.style.transform = 'translateX(' + ((shownP - 1) * 100).toFixed(2) + '%)';
+  }
+  function creep(to, sec) { if (to > sliderNow() + 0.002) sliderSet(to, sec); }   // never backwards
+  function sliderRestart() { sliderSet(0, 0); void moverEl.offsetWidth; }
+  function showErr(t) { console.warn(t); }    // no error panel on the page, errors go to the browser console
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    preRun: [mountSaves],                     // saves from IndexedDB before main()
+    reVCSyncSaves: function () { syncSaves(); },
+    reVCLoading: function () { gameLoadStep(); },
+    reVCLoadStart: function () { loadSteps = 0; showGameLoading(); },   // "load game" from the pause menu
+    reVCLoadEnd: function () { hideGameLoading(); },
+    print: function (t) { console.log(t); trackState(t); },
+    printErr: function (t) { console.warn(t); },
+    setStatus: function (t) { if (t) console.log('status: ' + t); },
+    instantiateWasm: function (imports, done) { return fixVideoModes(imports, done); },
+    onAbort: function (what) { fatal('Aborted(' + what + ')'); },
+    onRuntimeInitialized: function () {
+      gameStarted = true;
+      sliderSet(1, .35); overlay.classList.add('done'); fitCanvas(); Module.canvas.focus();
+      setTimeout(function () { overlay.style.display = 'none'; }, 600);
+      ysdkCall(function (f) {                 // tell Yandex the game has loaded and play started
+        if (f.LoadingAPI) f.LoadingAPI.ready();
+        if (f.GameplayAPI) f.GameplayAPI.start();
+      });
+    }
+  };
+  // ---- Compressed package (experiment): game data and reVC.wasm are stored as Brotli parts listed in pack.json.
+  // window.fetch is wrapped so reVC-data.js / reVC.js receive the original, decompressed bytes.
+  // Decoder: brotli-decode.min.js (Google Brotli JS decoder, MIT). Without pack.json files are fetched as-is.
+  var PACK = null, brotliDecode = null, _fetch = window.fetch.bind(window), packTotal = 0, packDone = 0,
+      partTime = Date.now(), partSec = 3;
+  function packEntry(input) {
+    if (!PACK) return null;
+    var url = typeof input === 'string' ? input : (input && input.url) || '';
+    return PACK[decodeURIComponent(url.split('?')[0].split('/').pop())] || null;
+  }
+  window.fetch = function (input, init) {
+    var e = packEntry(input);
+    if (!e) return _fetch(input, init);
+    var i = 0;
+    var body = new ReadableStream({
+      pull: function (ctrl) {
+        if (i >= e.parts.length) { ctrl.close(); return; }
+        var part = e.parts[i++];
+        return _fetch(part.name + '?v=' + V).then(function (r) {
+          if (!r.ok) throw new Error(r.status + ': ' + part.name);
+          return r.arrayBuffer();
+        }).then(function (buf) {
+          // a server that adds Content-Encoding: br would hand over already-decoded bytes
+          var out = buf.byteLength === part.raw ? new Int8Array(buf) : brotliDecode(new Int8Array(buf));
+          if (out.length !== part.raw) throw new Error('bad size after decode: ' + part.name);
+          ctrl.enqueue(new Uint8Array(out.buffer, out.byteOffset, out.length));
+          partDone(part);
+        });
+      }
+    });
+    return Promise.resolve(new Response(body, { status: 200, headers: { 'Content-Type': e.type } }));
+  };
+  function partDone(part) {          // loading slider: glide towards where the next part should end
+    packDone += part.raw;
+    var now = Date.now(); partSec = Math.max(1, (now - partTime) / 1000); partTime = now;
+    if (packTotal) {
+      var f = packDone / packTotal, next = Math.min(1, f + part.raw / packTotal);
+      creep(0.06 + 0.84 * f, 0.4); creep(0.06 + 0.84 * next, partSec * 1.5);
+      if (packDone >= packTotal) creep(0.97, 9);   // then: engine start
+    }
+  }
+  // Game data (about 230 MB unpacked) goes straight into one buffer, part by part: no copy of the whole package,
+  // no IndexedDB cache copy (reVC-data.js calls Module.reVCLoadPackage). Download starts together with the engine.
+  var nativeBr = (function () { try { new DecompressionStream('brotli'); return true; } catch (e) { return false; } })();
+  function unpackInto(out, off, buf, part) {
+    if (buf.byteLength === part.raw) { out.set(new Uint8Array(buf), off); return Promise.resolve(); }  // server already decoded it
+    if (nativeBr) {
+      var reader = new Blob([buf]).stream().pipeThrough(new DecompressionStream('brotli')).getReader(), pos = off;
+      return (function pump() {
+        return reader.read().then(function (r) {
+          if (r.done) { if (pos - off !== part.raw) throw new Error('bad size after decode: ' + part.name); return; }
+          out.set(r.value, pos); pos += r.value.length; return pump();
+        });
+      })();
+    }
+    var d = brotliDecode(new Int8Array(buf));
+    if (d.length !== part.raw) throw new Error('bad size after decode: ' + part.name);
+    out.set(new Uint8Array(d.buffer, d.byteOffset, d.length), off);
+    return Promise.resolve();
+  }
+  var dataPromise = null;
+  function loadDataPackage() {
+    var e = PACK && PACK['reVC-data.data'];
+    if (!e) return null;
+    var out = new Uint8Array(e.size), off = 0, i = 0;
+    function next() {
+      if (i >= e.parts.length) {
+        if (off !== e.size) throw new Error('package size mismatch');
+        return out.buffer;
+      }
+      var part = e.parts[i++];
+      return _fetch(part.name + '?v=' + V).then(function (r) {
+        if (!r.ok) throw new Error(r.status + ': ' + part.name);
+        return r.arrayBuffer();
+      }).then(function (buf) {
+        return unpackInto(out, off, buf, part);
+      }).then(function () { off += part.raw; partDone(part); return next(); });
+    }
+    return next().catch(function (err) { fatal('data: ' + err); throw err; });
+  }
+  Module.reVCLoadPackage = function () { return dataPromise || (dataPromise = loadDataPackage()); };
+  try { indexedDB.deleteDatabase('EM_PRELOAD_CACHE'); } catch (e) {}   // the old 230 MB cache of earlier builds
+  function preparePack() {
+    return _fetch('pack.json?v=' + V).then(function (r) { return r.ok ? r.json() : null; }).then(function (m) {
+      if (!m) return;                                   // no pack.json: plain files
+      for (var k in m) m[k].parts.forEach(function (p) { packTotal += p.raw; });
+      return import('./brotli-decode.min.js?v=' + V).then(function (mod) { brotliDecode = mod.BrotliDecode; PACK = m; });
+    });
+  }
+  // ----
+  // ---- Sound: AudioContexts are tracked and resumed by the pause block above (real click/key -> sound on).
+  // ---- Shader fix (experiment): with the GLES profile (see fixVideoModes) librw emits "#version 310 es";
+  // WebGL2 accepts only GLSL ES 3.00, the shaders themselves are ES-compatible.
+  (function () {
+    var P = window.WebGL2RenderingContext && WebGL2RenderingContext.prototype;
+    if (!P) return;
+    var orig = P.shaderSource;
+    P.shaderSource = function (sh, src) {
+      if (typeof src === 'string' && src.indexOf('#version 310 es') === 0)
+        src = '#version 300 es' + src.slice(15);   // librw ES header; WebGL2 = GLSL ES 3.00
+      return orig.call(this, sh, src);
+    };
+  })();
+  // ----
+  // ---- GLFW fixes (experiment): Emscripten's GLFW reports no video modes and glfwGetVideoMode() returns NULL,
+  // so re3 cancels device selection ("Cannot find desired video mode"). Provide one mode = canvas size.
+  // Done through the standard Module.instantiateWasm hook; reVC.js / reVC.wasm are not modified.
+  function fixVideoModes(imports, done) {
+    // Release builds minify import names (env.glfwGetVideoMode -> a.K), so look imports up by the JS function name.
+    function imp(name) {
+      for (var m in imports) { var o = imports[m]; if (!o) continue;
+        if (typeof o[name] === 'function') return { o: o, k: name };
+        for (var k in o) if (typeof o[k] === 'function' && (o[k].name === '_' + name || o[k].name === name)) return { o: o, k: k };
+      }
+      console.warn('import not found: ' + name); return null;
+    }
+    function wrap(name, f) { var r = imp(name); if (!r) return; var orig = r.o[r.k]; r.o[r.k] = f(orig); }
+    var ex = null, modePtr = 0;
+    function heap32() { return typeof HEAP32 !== 'undefined' ? HEAP32 : new Int32Array(ex.memory.buffer); }
+    function mode() {
+      if (!modePtr) modePtr = (typeof _malloc === 'function' ? _malloc : ex.malloc)(24);
+      var c = Module.canvas;
+      heap32().set([c.width || innerWidth, c.height || innerHeight, 8, 8, 8, 60], modePtr >>> 2);
+      return modePtr;
+    }
+    wrap('glfwGetVideoMode', function () { return function () { return mode(); }; });
+    // GLES profile: Emscripten's glfwCreateWindow ignores GLFW_CLIENT_API, so librw would take the desktop GL 3.3
+    // profile (unsized GL_DEPTH_STENCIL texture -> black 3D in WebGL2). Refuse non-ES requests -> librw tries ES next.
+    var clientApi = 0x30001;
+    wrap('glfwWindowHint', function (hint) { return function (h, v) { if (h === 0x22001) clientApi = v; return hint(h, v); }; });
+    // Always a window, never fullscreen: Emscripten would switch the page to fullscreen on the next click (and resize it)
+    wrap('glfwCreateWindow', function (create) { return function (w, h, title, monitor, share) {
+      return clientApi === 0x30002 ? create(w, h, title, 0, share) : 0; }; });
+    wrap('glfwGetVideoModes', function () { return function (monitor, countPtr) {
+      var p = mode(); heap32()[countPtr >>> 2] = 1; return p; }; });
+    // Game clock: psTimer() used clock_gettime(CLOCK_MONOTONIC_RAW = 4) (fixed in source now; kept as a safety net).
+    wrap('clock_time_get', function (clockGet) { return function (id, precision, ptime) {
+      return clockGet(id === 4 ? 1 : id, precision, ptime); }; });
+    function ready(r) { ex = r.instance.exports; done(r.instance); }
+    WebAssembly.instantiateStreaming(fetch('reVC.wasm'), imports).then(ready, function () {
+      return fetch('reVC.wasm').then(function (r) { return r.arrayBuffer(); })
+        .then(function (b) { return WebAssembly.instantiate(b, imports); }).then(ready);
+    }).catch(function (e) { fatal(e); });
+    return {};
+  }
+  // ----
+  // ---- Game state from the engine log (used for mouse capture). The menu is NOT pressed automatically.
+  var gameState = '', loadSteps = 0, LOAD_STEPS = 95;
+  function trackState(t) {
+    var m = /gGameState = (GS_\w+)/.exec(t); if (!m) return;
+    gameState = m[1];
+    if (gameState === 'GS_INIT_PLAYING_GAME') { loadSteps = 0; showGameLoading(); }   // new game / load: ~10 s
+    else if (gameState === 'GS_PLAYING_GAME') hideGameLoading();
+  }
+  // main.cpp patch calls Module.reVCLoading() for every loading step and lets the browser draw -> the slider moves
+  var lastStepAt = 0;
+  function gameLoadStep() {         // real progress only pushes the slider forward; it keeps gliding by itself
+    loadSteps++;
+    var now = Date.now(); if (now - lastStepAt < 250) return; lastStepAt = now;
+    var real = Math.min(1, loadSteps / LOAD_STEPS);
+    creep(Math.min(0.97, 0.9 * real + 0.12), 6);
+  }
+  function showGameLoading() {
+    overlay.style.display = 'flex'; overlay.classList.remove('done');
+    sliderRestart(); creep(0.88, 12);                  // ~10 s load: glide on its own, never stand still
+  }
+  function hideGameLoading() {
+    sliderSet(1, .35); overlay.classList.add('done'); Module.canvas.focus();
+    setTimeout(function () { if (overlay.classList.contains('done')) overlay.style.display = 'none'; }, 600);
+  }
+  // ----
+  function load(src, next) {
+    var s = document.createElement('script'); s.src = src + '?v=' + V;
+    s.onload = next || null; s.onerror = function () { console.warn('failed to load ' + src); };
+    document.body.appendChild(s);
+  }
+  // ---- Game language: strictly ysdk.environment.i18n.lang (the game starts only after YaGames.init() has answered);
+  // navigator.language only if the SDK failed (blocked / network). ru/be/uk/kk/uz -> 'ru', everything else -> 'en'.
+  // Passed to the game as the command line: -lang ru|en
+  function pickLanguage() {
+    return ysdkReady.then(function (s) {            // waits for YaGames.init(), no timeout
+      var code = '', from = 'ysdk.environment.i18n.lang';
+      if (s) { try { code = (s.environment && s.environment.i18n && s.environment.i18n.lang) || ''; } catch (e) {} }
+      else { code = navigator.language || navigator.userLanguage || 'ru'; from = 'navigator.language (SDK unavailable)'; }
+      var lang = /^(ru|be|uk|kk|uz)/i.test(code) ? 'ru' : 'en';
+      console.log('Game language: ' + lang + ' (' + from + ' = "' + code + '")');
+      gameLang = lang;
+      return lang;
+    });
+  }
+  // Start right away (no button). Sound starts after the first click/key (browser rule).
+  function startGame() {
+    var rs = renderSize(); Module.canvas.width = rs[0]; Module.canvas.height = rs[1];   // max 16:9 resolution
+    sliderRestart(); creep(0.06, 1.5);
+    var q = /[?&]fps=(\d+)/.exec(location.search);
+    Module.reVCMaxFPS = q ? +q[1] : (WEAK ? 30 : 60);     // frame cap, read by the game at start
+    console.log('device: ' + (WEAK ? 'weak' : 'normal') + ', render ' + rs[0] + 'x' + rs[1] + ', fps cap ' + Module.reVCMaxFPS);
+    preparePack().then(function () {
+      Module.reVCLoadPackage();                           // data download starts now, in parallel with the engine
+      load('reVC-data.js', function () {
+        pickLanguage().then(function (lang) { Module['arguments'] = ['-lang', lang]; load('reVC.js'); });
+      });
+    }).catch(function (e) { showErr('pack: ' + e); });
+  }
+  startGame();
+  Module.canvas.addEventListener('click', function () {
+    Module.canvas.focus();
+    // experiment: mouse look needs pointer lock, which the browser grants only on a click
+    if (gameState === 'GS_PLAYING_GAME' && document.pointerLockElement !== Module.canvas && Module.canvas.requestPointerLock)
+      try { var r = Module.canvas.requestPointerLock(); if (r && r.catch) r.catch(function () {}); } catch (e) {}
+  });
+  // crashes with their stack go to the browser console (function names come from --profiling-funcs)
+  window.addEventListener('error', function (e) { fatal(e.error || e.message); });
+  window.addEventListener('unhandledrejection', function (e) { var r = e.reason, t = String(r && (r.name + ' ' + r.message) || r);
+    // browser refusals (pointer lock / fullscreen / permissions without a click) are harmless -> console only
+    if (/NotAllowedError|Pointer ?Lock|Permissions check|user gesture|fullscreen/i.test(t)) { console.warn('ignored: ' + t); e.preventDefault(); return; }
+    fatal(r); });
+</script>
+</body>
+</html>
